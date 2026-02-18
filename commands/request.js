@@ -1,25 +1,7 @@
 const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
-const fs = require("fs/promises");
-const path = require("path");
+const { getGuildDataPath, readJson, writeJson } = require("../utils/storage");
 
-const REQUESTS_PATH = path.join(__dirname, "..", "data", "requests.json");
-
-const PLO_KOON_ID = "426881818764115968";
-
-async function readJson(filePath) {
-  try {
-    const raw = await fs.readFile(filePath, "utf8");
-    return JSON.parse(raw);
-  } catch (e) {
-    if (e.code === "ENOENT") return {};
-    throw e;
-  }
-}
-
-async function writeJson(filePath, data) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf8");
-}
+const PLO_KOON_ID = "426881818764115968"; // <-- FIX: paste the real copied user ID
 
 function parseLevels(input) {
   const parts = input.split(/[\s,]+/).filter(Boolean);
@@ -30,7 +12,6 @@ function parseLevels(input) {
     throw new Error("Levels must be integers between 1 and 200. Example: `145 144 143`");
   }
 
-  // enforce rule: first is highest, then non-increasing
   for (let i = 1; i < levels.length; i++) {
     if (levels[i] > levels[i - 1]) {
       throw new Error("Levels must be non-increasing (first highest). Example: `145 144 143`");
@@ -52,6 +33,14 @@ module.exports = {
     ),
 
   async execute(interaction) {
+    const guildId = interaction.guildId;
+    if (!guildId) {
+      return interaction.reply({
+        content: "❌ Use this command inside a server, not in DMs.",
+        ephemeral: true
+      });
+    }
+
     const raw = interaction.options.getString("levels", true);
     const user = interaction.user;
 
@@ -63,28 +52,27 @@ module.exports = {
     }
 
     const embed = new EmbedBuilder()
-  .setTitle("City Build Request")
-  .setDescription(
-`Player: <@${user.id}>
-Requested: **${levels.join(", ")}**
+      .setTitle("City Build Request")
+      .setDescription(
+        `Player: <@${user.id}>\n` +
+        `Requested: **${levels.join(", ")}**\n\n` +
+        `Builder: react with ✅ when built.`
+      );
 
-Builder: react with ✅ when built.`
-  );
+    const REQUESTS_PATH = getGuildDataPath(guildId, "requests.json");
 
-// Ping in content to guarantee notification
-const msg = await interaction.reply({
-  content: `<@${PLO_KOON_ID}> you have a city to build`,
-  embeds: [embed],
-  fetchReply: true,
-  allowedMentions: {
-    users: [PLO_KOON_ID] // ensures ping is not blocked
-  }
-});
+    const msg = await interaction.reply({
+      content: `<@${PLO_KOON_ID}> you have a city to build`,
+      embeds: [embed],
+      fetchReply: true,
+      allowedMentions: { users: [PLO_KOON_ID] }
+    });
 
-try { await msg.react("✅"); } catch {}
+    try { await msg.react("✅"); } catch {}
 
-const requests = await readJson(REQUESTS_PATH);
-requests[msg.id] = { userId: user.id, levels, createdAt: Date.now() };
-await writeJson(REQUESTS_PATH, requests);
+    const requests = await readJson(REQUESTS_PATH);
+    requests[msg.id] = { userId: user.id, levels, createdAt: Date.now() };
+    await writeJson(REQUESTS_PATH, requests);
   }
 };
+

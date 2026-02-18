@@ -13,11 +13,16 @@ module.exports = {
     ),
 
   async execute(interaction) {
+    const guildId = interaction.guildId;
+    if (!guildId) {
+      return interaction.reply({ content: "❌ Use this command inside a server, not in DMs.", ephemeral: true });
+    }
+
     const raw = interaction.options.getString("amount", false);
 
     // View
     if (!raw) {
-      const rec = await valorStore.getUser(interaction.user.id);
+      const rec = await valorStore.getUser(guildId, interaction.user.id);
       if (!rec) {
         return interaction.reply({ content: "No builder valor saved yet. Use `/buildervalor 10G`.", ephemeral: true });
       }
@@ -35,10 +40,10 @@ module.exports = {
       return interaction.reply({ content: `❌ ${e.message}`, ephemeral: true });
     }
 
-    await valorStore.upsert(interaction.user.id, v, "builder");
+    await valorStore.upsert(guildId, interaction.user.id, v, "builder");
 
     return interaction.reply({
-      content: `Saved your valor as **${formatValue(v)}** (builder).`,
+      content: `Saved your valor as **${formatValue(v)}** (builder) for this server.`,
       ephemeral: true
     });
   }

@@ -21,7 +21,6 @@ function findTopBuilder(all) {
 }
 
 function closestAbove(list, myValor, limit) {
-  // smallest above me first (closest stronger)
   return list
     .filter(x => x.valor > myValor)
     .sort((a, b) => a.valor - b.valor)
@@ -29,7 +28,6 @@ function closestAbove(list, myValor, limit) {
 }
 
 function closestBelow(list, myValor, limit) {
-  // largest below me first (closest weaker)
   return list
     .filter(x => x.valor < myValor)
     .sort((a, b) => b.valor - a.valor)
@@ -42,9 +40,17 @@ module.exports = {
     .setDescription("Show ladder % vs builder, stronger, and weaker"),
 
   async execute(interaction) {
+    const guildId = interaction.guildId;
+    if (!guildId) {
+      return interaction.reply({
+        content: "❌ Use this command inside a server, not in DMs.",
+        ephemeral: true
+      });
+    }
+
     const userId = interaction.user.id;
 
-    const all = await valorStore.getAll();
+    const all = await valorStore.getAll(guildId);
     const me = all[userId];
 
     if (!me || !me.valor) {
@@ -68,7 +74,6 @@ module.exports = {
     const myToBuilder = pct(myValor, builderValor);
     const inLadderRange = myToBuilder >= 30 && myToBuilder <= 100;
 
-    // Include everyone with a valor (players + builders), excluding me
     const everyone = Object.entries(all)
       .filter(([id, v]) => id !== userId && Number(v.valor) > 0)
       .map(([id, v]) => ({ userId: id, valor: Number(v.valor), type: v.type }));
@@ -85,7 +90,6 @@ module.exports = {
         `Status: **${inLadderRange ? "✅ In ladder range (30–100%)" : "⚠️ Outside ladder range"}**`
       );
 
-    // If NOT in range: show stronger section (with two % values per person)
     if (!inLadderRange) {
       if (stronger.length) {
         const lines = stronger.map(s => {
@@ -101,7 +105,6 @@ module.exports = {
       }
     }
 
-    // Always show weaker section (their % to you)
     if (weaker.length) {
       const lines = weaker.map(w => {
         const wToYou = pct(w.valor, myValor);

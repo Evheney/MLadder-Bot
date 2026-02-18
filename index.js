@@ -3,17 +3,25 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 
-const { Client, GatewayIntentBits, Collection, Events } = require("discord.js");
+const {
+  Client,
+  GatewayIntentBits,
+  Collection,
+  Events,
+  Partials
+} = require("discord.js");
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.GuildMessages,
+    // MessageContent is NOT needed for slash commands or reactions,
+    // but you can keep it if you later read text messages.
     GatewayIntentBits.MessageContent
-  ]
+  ],
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
-
 
 client.commands = new Collection();
 
@@ -32,7 +40,6 @@ client.once(Events.ClientReady, () => {
 
 // THIS PART HANDLES COMMANDS
 client.on(Events.InteractionCreate, async interaction => {
-
   if (!interaction.isChatInputCommand()) return;
 
   const command = client.commands.get(interaction.commandName);
@@ -58,8 +65,5 @@ client.on(Events.InteractionCreate, async interaction => {
 // THIS PART HANDLES reactions
 const registerReactionAddHandler = require("./handlers/reactionAdd");
 registerReactionAddHandler(client);
-
-
-
 
 client.login(process.env.DISCORD_TOKEN);
