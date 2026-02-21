@@ -3,8 +3,18 @@
 const path = require("path");
 const Database = require("better-sqlite3");
 
+// -----------------
+// Helpers
+// -----------------
 function now() {
   return Math.floor(Date.now() / 1000);
+}
+
+function toOffsetExprMinutes(mins) {
+  // SQLite datetime modifier string, e.g. "-360 minutes", "180 minutes"
+  const m = Number(mins);
+  if (!Number.isFinite(m)) return "-360 minutes";
+  return `${m} minutes`;
 }
 
 class DB {
@@ -12,71 +22,112 @@ class DB {
     const dbPath = path.join(__dirname, "bot.db");
     this.db = new Database(dbPath);
 
+    // -----------------
+    // SQLite pragmas
+    // -----------------
     this.db.pragma("foreign_keys = ON");
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
     this.db.pragma("busy_timeout = 5000");
 
-    // Ensure guild_settings table exists (schema bootstrap)
+    // -----------------
+    // Schema bootstrap
+    // -----------------
     this.db.exec(`
-  CREATE TABLE IF NOT EXISTS guilds (
-    guild_id TEXT PRIMARY KEY,
-    created_at INTEGER NOT NULL
-  );
+      CREATE TABLE IF NOT EXISTS guilds (
+        guild_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL
+      );
 
-  CREATE TABLE IF NOT EXISTS seasons (
-    guild_id TEXT NOT NULL,
-    season_id INTEGER NOT NULL,
-    is_active INTEGER NOT NULL DEFAULT 1,
-    created_by TEXT,
-    created_at INTEGER NOT NULL,
-    PRIMARY KEY (guild_id, season_id)
-  );
+      CREATE TABLE IF NOT EXISTS seasons (
+        guild_id TEXT NOT NULL,
+        season_id INTEGER NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (guild_id, season_id)
+      );
 
-  CREATE TABLE IF NOT EXISTS members (
-    guild_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    bot_role TEXT,
-    valor INTEGER NOT NULL DEFAULT 0,
-    username TEXT,
-    global_name TEXT,
-    nickname TEXT,
-    name_updated_at INTEGER,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    PRIMARY KEY (guild_id, user_id)
-  );
+      CREATE TABLE IF NOT EXISTS members (
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        bot_role TEXT,
+        valor INTEGER NOT NULL DEFAULT 0,
+        username TEXT,
+        global_name TEXT,
+        nickname TEXT,
+        name_updated_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (guild_id, user_id)
+      );
 
-  CREATE TABLE IF NOT EXISTS requests (
-    guild_id TEXT NOT NULL,
-    season_id INTEGER NOT NULL,
-    message_id TEXT NOT NULL,
-    requester_id TEXT NOT NULL,
-    levels_json TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open',
-    claimed_by TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    PRIMARY KEY (guild_id, season_id, message_id)
-  );
+      CREATE TABLE IF NOT EXISTS requests (
+        guild_id TEXT NOT NULL,
+        season_id INTEGER NOT NULL,
+        message_id TEXT NOT NULL,
+        requester_id TEXT NOT NULL,
+        levels_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        claimed_by TEXT,
+        meta_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (guild_id, season_id, message_id)
+      );
 
-  CREATE TABLE IF NOT EXISTS actions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id TEXT NOT NULL,
-    season_id INTEGER NOT NULL,
-    user_id TEXT NOT NULL,
-    type TEXT NOT NULL,
-    value INTEGER NOT NULL,
-    meta_json TEXT,
-    created_at INTEGER NOT NULL
-  );
-`);
+      CREATE TABLE IF NOT EXISTS actions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id TEXT NOT NULL,
+        season_id INTEGER NOT NULL,
+        user_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        value INTEGER NOT NULL,
+        meta_json TEXT,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS guild_settings (
+        guild_id TEXT PRIMARY KEY,
+        roles_channel_id TEXT,
+        roles_message_id TEXT,
+        role_builder_id TEXT,
+        role_striker_id TEXT,
+        role_pinkcleaner_id TEXT,
+        role_player_id TEXT,
+        timezone_offset_minutes INTEGER NOT NULL DEFAULT -360,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+
+    // -----------------
+    // Migrations (safe)
+    // -----------------
+    try {
+      this.db.exec(`ALTER TABLE requests ADD COLUMN meta_json TEXT`);
+    } catch (_) {
+      // already exists
+    }
+
+    try {
+      this.db.exec(`
+        ALTER TABLE guild_settings
+        ADD COLUMN timezone_offset_minutes INTEGER NOT NULL DEFAULT -360
+      `);
+    } catch (_) {
+      // already exists
+    }
 
     this._prepare();
   }
 
+  // -----------------
+  // Prepared statements
+  // -----------------
   _prepare() {
-    // ---- Guilds / Seasons ----
+    // =========================================================
+    // GUILDS + SEASONS
+    // =========================================================
     this.ensureGuildStmt = this.db.prepare(`
       INSERT INTO guilds (guild_id, created_at)
       VALUES (?, ?)
@@ -89,10 +140,18 @@ class DB {
       LIMIT 1
     `);
 
-    this.getRequestStmt = this.db.prepare(`
-      SELECT * FROM requests
-      WHERE guild_id=? AND season_id=? AND message_id=?
+    this.seasonExistsStmt = this.db.prepare(`
+      SELECT 1
+      FROM seasons
+      WHERE guild_id=? AND season_id=?
       LIMIT 1
+    `);
+
+    this.listSeasonsStmt = this.db.prepare(`
+      SELECT season_id, is_active, created_by, created_at
+      FROM seasons
+      WHERE guild_id=?
+      ORDER BY season_id DESC
     `);
 
     this.deactivateSeasonsStmt = this.db.prepare(`
@@ -105,7 +164,42 @@ class DB {
       VALUES (?, ?, 1, ?, ?)
     `);
 
-    // ---- Members (for role picker name caching) ----
+    this.upsertSeasonStmt = this.db.prepare(`
+      INSERT INTO seasons (guild_id, season_id, is_active, created_by, created_at)
+      VALUES (?, ?, 1, ?, ?)
+      ON CONFLICT(guild_id, season_id) DO UPDATE SET
+        is_active = 1
+    `);
+
+    // =========================================================
+    // GUILD SETTINGS (setup + roles + timezone)
+    // =========================================================
+    this.getGuildSettingsStmt = this.db.prepare(`
+      SELECT * FROM guild_settings WHERE guild_id = ? LIMIT 1
+    `);
+
+    this.upsertGuildSettingsStmt = this.db.prepare(`
+      INSERT INTO guild_settings (
+        guild_id, roles_channel_id, roles_message_id,
+        role_builder_id, role_striker_id, role_pinkcleaner_id, role_player_id,
+        timezone_offset_minutes,
+        updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id) DO UPDATE SET
+        roles_channel_id = excluded.roles_channel_id,
+        roles_message_id = excluded.roles_message_id,
+        role_builder_id  = excluded.role_builder_id,
+        role_striker_id  = excluded.role_striker_id,
+        role_pinkcleaner_id = excluded.role_pinkcleaner_id,
+        role_player_id   = excluded.role_player_id,
+        timezone_offset_minutes = excluded.timezone_offset_minutes,
+        updated_at       = excluded.updated_at
+    `);
+
+    // =========================================================
+    // MEMBERS (role picker name caching + valor)
+    // =========================================================
     this.insertMemberIfMissingStmt = this.db.prepare(`
       INSERT INTO members (
         guild_id, user_id, bot_role, valor,
@@ -127,29 +221,33 @@ class DB {
       WHERE guild_id = ? AND user_id = ?
     `);
 
-    // ---- Guild Settings (for /setup + role IDs + channel/message IDs) ----
-    this.getGuildSettingsStmt = this.db.prepare(`
-      SELECT * FROM guild_settings WHERE guild_id = ? LIMIT 1
+    this.getMemberValorStmt = this.db.prepare(`
+      SELECT valor FROM members WHERE guild_id=? AND user_id=? LIMIT 1
     `);
 
-    this.upsertGuildSettingsStmt = this.db.prepare(`
-      INSERT INTO guild_settings (
-        guild_id, roles_channel_id, roles_message_id,
-        role_builder_id, role_striker_id, role_pinkcleaner_id, role_player_id,
-        updated_at
+    this.getMemberNamesStmt = this.db.prepare(`
+      SELECT nickname, global_name, username, bot_role, valor
+      FROM members
+      WHERE guild_id=? AND user_id=?
+      LIMIT 1
+    `);
+    this.getMembersMetaByIdsStmt = this.db.prepare(`
+      SELECT user_id, bot_role, valor, username, global_name, nickname
+      FROM members
+      WHERE guild_id = ? AND user_id IN (
+        SELECT value FROM json_each(?)
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(guild_id) DO UPDATE SET
-        roles_channel_id = excluded.roles_channel_id,
-        roles_message_id = excluded.roles_message_id,
-        role_builder_id  = excluded.role_builder_id,
-        role_striker_id  = excluded.role_striker_id,
-        role_pinkcleaner_id = excluded.role_pinkcleaner_id,
-        role_player_id   = excluded.role_player_id,
-        updated_at       = excluded.updated_at
     `);
 
-    // ---- Requests / Actions ----
+    // =========================================================
+    // REQUESTS (request lifecycle + buttons)
+    // =========================================================
+    this.getRequestStmt = this.db.prepare(`
+      SELECT * FROM requests
+      WHERE guild_id=? AND season_id=? AND message_id=?
+      LIMIT 1
+    `);
+
     this.insertRequestStmt = this.db.prepare(`
       INSERT INTO requests (
         guild_id, season_id, message_id, requester_id,
@@ -164,18 +262,29 @@ class DB {
       WHERE guild_id=? AND season_id=? AND message_id=? AND status='open'
     `);
 
+    // requires same builder to complete
     this.completeRequestStmt = this.db.prepare(`
       UPDATE requests
       SET status='completed', updated_at=?
       WHERE guild_id=? AND season_id=? AND message_id=? AND status='claimed' AND claimed_by=?
     `);
 
+    this.cancelRequestStmt = this.db.prepare(`
+      UPDATE requests
+      SET status='cancelled', meta_json=?, updated_at=?
+      WHERE guild_id=? AND season_id=? AND message_id=?
+        AND status IN ('open','claimed')
+    `);
+
+    // =========================================================
+    // ACTIONS (writes + leaderboards)
+    // =========================================================
     this.insertActionStmt = this.db.prepare(`
       INSERT INTO actions (guild_id, season_id, user_id, type, value, meta_json, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
 
-    this.leaderboardStmt = this.db.prepare(`
+    this.hitLeaderboardStmt = this.db.prepare(`
       SELECT user_id, SUM(value) as total
       FROM actions
       WHERE guild_id=? AND season_id=? AND type='hit'
@@ -193,90 +302,236 @@ class DB {
       LIMIT ?
     `);
 
+    // =========================================================
+    // ACTIVITY / DAILY AGGREGATIONS (timezone-aware)
+    // Uses offsetExpr like "-360 minutes"
+    // Uses sinceExpr like "-7 days"
+    // =========================================================
+
     // Daily totals per user (build)
+    // params: offsetExpr, guildId, seasonId, offsetExpr, offsetExpr, sinceExpr
     this.dailyBuildsStmt = this.db.prepare(`
-    SELECT
+      SELECT
         user_id,
-        date(datetime(created_at, 'unixepoch', '-6 hours')) AS day,
+        date(datetime(created_at, 'unixepoch', ?)) AS day,
         SUM(value) AS total
-    FROM actions
-    WHERE guild_id=? AND season_id=? AND type='build'
-        AND datetime(created_at, 'unixepoch', '-6 hours') >= datetime('now', '-6 hours', ?)
-    GROUP BY user_id, day
-    ORDER BY day DESC, total DESC
+      FROM actions
+      WHERE guild_id=? AND season_id=? AND type='build'
+        AND datetime(created_at, 'unixepoch', ?) >= datetime('now', ?, ?)
+      GROUP BY user_id, day
+      ORDER BY day DESC, total DESC
     `);
 
     // Daily totals per user (hit)
+    // params: offsetExpr, guildId, seasonId, offsetExpr, offsetExpr, sinceExpr
     this.dailyHitsStmt = this.db.prepare(`
-    SELECT
+      SELECT
         user_id,
-        date(datetime(created_at, 'unixepoch', '-6 hours')) AS day,
+        date(datetime(created_at, 'unixepoch', ?)) AS day,
         SUM(value) AS total
-    FROM actions
-    WHERE guild_id=? AND season_id=? AND type='hit'
-        AND datetime(created_at, 'unixepoch', '-6 hours') >= datetime('now', '-6 hours', ?)
-    GROUP BY user_id, day
-    ORDER BY day DESC, total DESC
+      FROM actions
+      WHERE guild_id=? AND season_id=? AND type='hit'
+        AND datetime(created_at, 'unixepoch', ?) >= datetime('now', ?, ?)
+      GROUP BY user_id, day
+      ORDER BY day DESC, total DESC
     `);
 
+    // Server totals per day
+    // params: offsetExpr, guildId, seasonId, offsetExpr, offsetExpr, sinceExpr
     this.dailyTotalsStmt = this.db.prepare(`
-    SELECT
-        date(datetime(created_at, 'unixepoch', '-6 hours')) AS day,
+      SELECT
+        date(datetime(created_at, 'unixepoch', ?)) AS day,
         SUM(CASE WHEN type='build' THEN value ELSE 0 END) AS builds,
         SUM(CASE WHEN type='hit' THEN value ELSE 0 END) AS hits
-    FROM actions
-    WHERE guild_id=? AND season_id=?
-        AND datetime(created_at, 'unixepoch', '-6 hours') >= datetime('now', '-6 hours', ?)
-    GROUP BY day
-    ORDER BY day DESC
+      FROM actions
+      WHERE guild_id=? AND season_id=?
+        AND datetime(created_at, 'unixepoch', ?) >= datetime('now', ?, ?)
+      GROUP BY day
+      ORDER BY day DESC
     `);
 
-    this.userDailyTotalsStmt = this.db.prepare(`
-    SELECT
-        date(datetime(created_at, 'unixepoch', '-6 hours')) AS day,
-        SUM(CASE WHEN type='build' THEN value ELSE 0 END) AS builds,
-        SUM(CASE WHEN type='hit' THEN value ELSE 0 END) AS hits
-    FROM actions
-    WHERE guild_id=? AND season_id=? AND user_id=?
-        AND datetime(created_at, 'unixepoch', '-6 hours') >= datetime('now', '-6 hours', '-2 days')
-    GROUP BY day
-    ORDER BY day DESC
-    `);
-
-    this.activityAllStmt = this.db.prepare(`
-    WITH agg AS (
+    // =========================================================
+    // SERVER DAILY SERIES (for /chartserver) includes zero days
+    // =========================================================
+    // params:
+    // offsetExpr, startDayOffset, offsetExpr, offsetExpr, guildId, seasonId, offsetExpr, offsetExpr, sinceExpr
+    this.serverDailySeriesForChartStmt = this.db.prepare(`
+      WITH RECURSIVE days(day) AS (
+        SELECT date(datetime('now', ?, ?))
+        UNION ALL
+        SELECT date(day, '+1 day') FROM days
+        WHERE day < date(datetime('now', ?))
+      ),
+      agg AS (
         SELECT
-        user_id,
-        date(datetime(created_at, 'unixepoch', '-6 hours')) AS day,
-        SUM(CASE WHEN type='build' THEN value ELSE 0 END) AS builds,
-        SUM(CASE WHEN type='hit' THEN value ELSE 0 END) AS hits
+          date(datetime(created_at, 'unixepoch', ?)) AS day,
+          SUM(CASE WHEN type='build' THEN value ELSE 0 END) AS builds,
+          SUM(CASE WHEN type='hit' THEN value ELSE 0 END) AS hits
         FROM actions
         WHERE guild_id=? AND season_id=?
-        AND datetime(created_at, 'unixepoch', '-6 hours') >= datetime('now', '-6 hours', '-1 day')
-        GROUP BY user_id, day
-    ),
-    days AS (
-        SELECT
-        date(datetime('now', '-6 hours')) AS today,
-        date(datetime('now', '-6 hours', '-1 day')) AS yesterday
-    )
-    SELECT
-        a.user_id,
+          AND datetime(created_at, 'unixepoch', ?) >= datetime('now', ?, ?)
+        GROUP BY day
+      )
+      SELECT
+        days.day AS day,
+        COALESCE(agg.builds, 0) AS builds,
+        COALESCE(agg.hits, 0) AS hits
+      FROM days
+      LEFT JOIN agg ON agg.day = days.day
+      ORDER BY days.day ASC
+    `);
 
+    // =========================================================
+    // USER TOTALS (season + window) / activity comparisons
+    // =========================================================
+    this.userTotalsSeasonStmt = this.db.prepare(`
+      SELECT
+        user_id,
+        SUM(CASE WHEN type='build' THEN value ELSE 0 END) AS builds,
+        SUM(CASE WHEN type='hit' THEN value ELSE 0 END) AS hits
+      FROM actions
+      WHERE guild_id=? AND season_id=?
+      GROUP BY user_id
+    `);
+
+    // params: guildId, seasonId, offsetExpr, offsetExpr, sinceExpr
+    this.userTotalsWindowStmt = this.db.prepare(`
+      SELECT
+        user_id,
+        SUM(CASE WHEN type='build' THEN value ELSE 0 END) AS builds,
+        SUM(CASE WHEN type='hit' THEN value ELSE 0 END) AS hits
+      FROM actions
+      WHERE guild_id=? AND season_id=?
+        AND datetime(created_at, 'unixepoch', ?) >= datetime('now', ?, ?)
+      GROUP BY user_id
+    `);
+
+    // params: offsetExpr, guildId, seasonId, userId, offsetExpr, offsetExpr
+    this.userDailyTotalsStmt = this.db.prepare(`
+      SELECT
+        date(datetime(created_at, 'unixepoch', ?)) AS day,
+        SUM(CASE WHEN type='build' THEN value ELSE 0 END) AS builds,
+        SUM(CASE WHEN type='hit' THEN value ELSE 0 END) AS hits
+      FROM actions
+      WHERE guild_id=? AND season_id=? AND user_id=?
+        AND datetime(created_at, 'unixepoch', ?) >= datetime('now', ?, '-2 days')
+      GROUP BY day
+      ORDER BY day DESC
+    `);
+
+    // params: offsetExpr, offsetExpr, guildId, seasonId, offsetExpr, offsetExpr
+    this.activityAllStmt = this.db.prepare(`
+      WITH agg AS (
+        SELECT
+          user_id,
+          date(datetime(created_at, 'unixepoch', ?)) AS day,
+          SUM(CASE WHEN type='build' THEN value ELSE 0 END) AS builds,
+          SUM(CASE WHEN type='hit' THEN value ELSE 0 END) AS hits
+        FROM actions
+        WHERE guild_id=? AND season_id=?
+          AND datetime(created_at, 'unixepoch', ?) >= datetime('now', ?, '-1 day')
+        GROUP BY user_id, day
+      ),
+      days AS (
+        SELECT
+          date(datetime('now', ?)) AS today,
+          date(datetime('now', ?, '-1 day')) AS yesterday
+      )
+      SELECT
+        a.user_id,
         COALESCE(SUM(CASE WHEN a.day = days.today THEN a.builds END), 0) AS today_builds,
         COALESCE(SUM(CASE WHEN a.day = days.yesterday THEN a.builds END), 0) AS yesterday_builds,
-
         COALESCE(SUM(CASE WHEN a.day = days.today THEN a.hits END), 0) AS today_hits,
         COALESCE(SUM(CASE WHEN a.day = days.yesterday THEN a.hits END), 0) AS yesterday_hits
+      FROM agg a, days
+      GROUP BY a.user_id
+    `);
 
-    FROM agg a, days
-    GROUP BY a.user_id
+    // params:
+    // offsetExpr, startDayOffset, offsetExpr, offsetExpr, guildId, seasonId, userId, offsetExpr, offsetExpr, sinceExpr
+    this.userDailySeriesStmt = this.db.prepare(`
+      WITH RECURSIVE days(day) AS (
+        SELECT date(datetime('now', ?, ?))
+        UNION ALL
+        SELECT date(day, '+1 day') FROM days
+        WHERE day < date(datetime('now', ?))
+      ),
+      agg AS (
+        SELECT
+          date(datetime(created_at, 'unixepoch', ?)) AS day,
+          SUM(CASE WHEN type='build' THEN value ELSE 0 END) AS builds,
+          SUM(CASE WHEN type='hit' THEN value ELSE 0 END) AS hits
+        FROM actions
+        WHERE guild_id=? AND season_id=? AND user_id=?
+          AND datetime(created_at, 'unixepoch', ?) >= datetime('now', ?, ?)
+        GROUP BY day
+      )
+      SELECT
+        days.day AS day,
+        COALESCE(agg.builds, 0) AS builds,
+        COALESCE(agg.hits, 0) AS hits
+      FROM days
+      LEFT JOIN agg ON agg.day = days.day
+      ORDER BY days.day ASC
+    `);
+
+    // =========================================================
+    // EXPORTDAILY (per user per day, timezone-aware) + member cache join
+    // =========================================================
+
+    // scope=season
+    // params: offsetExpr, guildId, seasonId
+    this.exportDailySeasonStmt = this.db.prepare(`
+      SELECT
+        date(datetime(a.created_at, 'unixepoch', ?)) AS day,
+        a.user_id AS user_id,
+
+        COALESCE(m.bot_role, '') AS bot_role,
+        COALESCE(m.nickname, '') AS nickname,
+        COALESCE(m.global_name, '') AS global_name,
+        COALESCE(m.username, '') AS username,
+
+        SUM(CASE WHEN a.type='build' THEN a.value ELSE 0 END) AS builds,
+        SUM(CASE WHEN a.type='hit' THEN a.value ELSE 0 END) AS hits,
+
+        COALESCE(m.valor, 0) AS valor_raw
+      FROM actions a
+      LEFT JOIN members m
+        ON m.guild_id = a.guild_id AND m.user_id = a.user_id
+      WHERE a.guild_id = ? AND a.season_id = ?
+      GROUP BY day, a.user_id
+      ORDER BY day ASC, builds DESC, hits DESC
+    `);
+
+    // scope=window
+    // params: offsetExpr, guildId, seasonId, offsetExpr, offsetExpr, sinceExpr
+    this.exportDailyWindowStmt = this.db.prepare(`
+      SELECT
+        date(datetime(a.created_at, 'unixepoch', ?)) AS day,
+        a.user_id AS user_id,
+
+        COALESCE(m.bot_role, '') AS bot_role,
+        COALESCE(m.nickname, '') AS nickname,
+        COALESCE(m.global_name, '') AS global_name,
+        COALESCE(m.username, '') AS username,
+
+        SUM(CASE WHEN a.type='build' THEN a.value ELSE 0 END) AS builds,
+        SUM(CASE WHEN a.type='hit' THEN a.value ELSE 0 END) AS hits,
+
+        COALESCE(m.valor, 0) AS valor_raw
+      FROM actions a
+      LEFT JOIN members m
+        ON m.guild_id = a.guild_id AND m.user_id = a.user_id
+      WHERE a.guild_id = ? AND a.season_id = ?
+        AND datetime(a.created_at, 'unixepoch', ?) >= datetime('now', ?, ?)
+      GROUP BY day, a.user_id
+      ORDER BY day ASC, builds DESC, hits DESC
     `);
   }
 
-  // -----------------
-  // Guild / Season
-  // -----------------
+  // =========================================================
+  // GUILDS / SEASONS
+  // =========================================================
   ensureGuild(guildId) {
     this.ensureGuildStmt.run(guildId, now());
   }
@@ -291,10 +546,90 @@ class DB {
     this.insertSeasonStmt.run(guildId, 1, null, now());
     return 1;
   }
+  seasonExists(guildId, seasonId) {
+    const row = this.seasonExistsStmt.get(guildId, seasonId);
+    return !!row;
+  }
 
-  // -----------------
-  // Members (used by role picker)
-  // -----------------
+  listSeasons(guildId) {
+    this.ensureGuild(guildId);
+    return this.listSeasonsStmt.all(guildId);
+  }
+
+  startSeason(guildId, seasonId, createdBy = null) {
+    this.ensureGuild(guildId);
+    const t = now();
+
+    const tx = this.db.transaction(() => {
+      this.deactivateSeasonsStmt.run(guildId);
+      this.upsertSeasonStmt.run(guildId, seasonId, createdBy, t);
+    });
+
+    tx();
+    return seasonId;
+  }
+
+  // =========================================================
+  // GUILD SETTINGS
+  // =========================================================
+  getGuildSettings(guildId) {
+    return this.getGuildSettingsStmt.get(guildId) || null;
+  }
+
+  getTimezoneOffsetMinutes(guildId) {
+    const row = this.getGuildSettings(guildId);
+    return row?.timezone_offset_minutes ?? -360;
+  }
+
+  getOffsetExpr(guildId) {
+    return toOffsetExprMinutes(this.getTimezoneOffsetMinutes(guildId));
+  }
+
+  saveGuildSettings(data) {
+    // Accept BOTH snake_case and camelCase
+    const guildId = data.guild_id ?? data.guildId;
+
+    const rolesChannelId = data.roles_channel_id ?? data.rolesChannelId;
+    const rolesMessageId = data.roles_message_id ?? data.rolesMessageId;
+
+    const roleBuilderId = data.role_builder_id ?? data.roleBuilderId;
+    const roleStrikerId = data.role_striker_id ?? data.roleStrikerId;
+    const rolePinkcleanerId = data.role_pinkcleaner_id ?? data.rolePinkcleanerId;
+    const rolePlayerId = data.role_player_id ?? data.rolePlayerId;
+
+    const tzIncoming =
+      data.timezone_offset_minutes ??
+      data.timezoneOffsetMinutes ??
+      data.tz_offset_minutes ??
+      data.tzOffsetMinutes;
+
+    if (!guildId) throw new Error("saveGuildSettings: missing guild_id/guildId");
+
+    this.ensureGuild(guildId);
+
+    // Preserve existing timezone if not provided
+    const existing = this.getGuildSettings(guildId);
+    const tz =
+      typeof tzIncoming === "number"
+        ? tzIncoming
+        : existing?.timezone_offset_minutes ?? -360;
+
+    this.upsertGuildSettingsStmt.run(
+      guildId,
+      rolesChannelId ?? existing?.roles_channel_id ?? null,
+      rolesMessageId ?? existing?.roles_message_id ?? null,
+      roleBuilderId ?? existing?.role_builder_id ?? null,
+      roleStrikerId ?? existing?.role_striker_id ?? null,
+      rolePinkcleanerId ?? existing?.role_pinkcleaner_id ?? null,
+      rolePlayerId ?? existing?.role_player_id ?? null,
+      tz,
+      now()
+    );
+  }
+
+  // =========================================================
+  // MEMBERS
+  // =========================================================
   upsertMember({
     guildId,
     userId,
@@ -304,11 +639,10 @@ class DB {
     nickname = null,
   }) {
     const t = now();
-    const nameUpdatedAt = (username || globalName || nickname) ? t : null;
+    const nameUpdatedAt = username || globalName || nickname ? t : null;
 
     this.ensureGuild(guildId);
 
-    // Ensure row exists with valor=0
     this.insertMemberIfMissingStmt.run(
       guildId,
       userId,
@@ -321,7 +655,6 @@ class DB {
       t
     );
 
-    // Update metadata/role (does NOT touch valor)
     this.updateMemberMetaStmt.run(
       botRole,
       username,
@@ -334,43 +667,23 @@ class DB {
     );
   }
 
-  // -----------------
-  // Guild Settings (/setup)
-  // -----------------
-  getGuildSettings(guildId) {
-    return this.getGuildSettingsStmt.get(guildId) || null;
+  getMemberValor(guildId, userId) {
+    const row = this.getMemberValorStmt.get(guildId, userId);
+    return row?.valor ?? 0;
   }
 
-  saveGuildSettings(data) {
-  // Accept BOTH snake_case (preferred) and camelCase (old)
-  const guildId = data.guild_id ?? data.guildId;
-  const rolesChannelId = data.roles_channel_id ?? data.rolesChannelId;
-  const rolesMessageId = data.roles_message_id ?? data.rolesMessageId;
+  getMemberNames(guildId, userId) {
+    return this.getMemberNamesStmt.get(guildId, userId) || null;
+  }
 
-  const roleBuilderId = data.role_builder_id ?? data.roleBuilderId;
-  const roleStrikerId = data.role_striker_id ?? data.roleStrikerId;
-  const rolePinkcleanerId = data.role_pinkcleaner_id ?? data.rolePinkcleanerId;
-  const rolePlayerId = data.role_player_id ?? data.rolePlayerId;
+  getMembersMetaByIds(guildId, userIds) {
+  const arr = Array.isArray(userIds) ? userIds : [];
+  return this.getMembersMetaByIdsStmt.all(guildId, JSON.stringify(arr));
+  }
 
-  if (!guildId) throw new Error("saveGuildSettings: missing guild_id/guildId");
-
-  this.ensureGuild(guildId);
-
-  this.upsertGuildSettingsStmt.run(
-    guildId,
-    rolesChannelId || null,
-    rolesMessageId || null,
-    roleBuilderId || null,
-    roleStrikerId || null,
-    rolePinkcleanerId || null,
-    rolePlayerId || null,
-    now()
-  );
-}
-
-  // -----------------
-  // Requests / Actions
-  // -----------------
+  // =========================================================
+  // REQUESTS / ACTIONS
+  // =========================================================
   createRequest({ guildId, seasonId, messageId, requesterId, levels }) {
     this.insertRequestStmt.run(
       guildId,
@@ -381,6 +694,10 @@ class DB {
       now(),
       now()
     );
+  }
+
+  getRequest({ guildId, seasonId, messageId }) {
+    return this.getRequestStmt.get(guildId, seasonId, messageId) || null;
   }
 
   claimRequest({ guildId, seasonId, messageId, builderId }) {
@@ -396,16 +713,17 @@ class DB {
 
   completeRequest({ guildId, seasonId, messageId, builderId, levels }) {
     const tx = this.db.transaction(() => {
-     const res = this.completeRequestStmt.run(
+      const res = this.completeRequestStmt.run(
         now(),
         guildId,
         seasonId,
         messageId,
         builderId
-    );
+      );
 
       if (res.changes !== 1) return false;
 
+      // hits: 1 per level
       for (const lvl of levels) {
         this.insertActionStmt.run(
           guildId,
@@ -418,12 +736,13 @@ class DB {
         );
       }
 
+      // builds: value = number requested (levels.length)
       this.insertActionStmt.run(
         guildId,
         seasonId,
         builderId,
         "build",
-        levels.length, // ✅ builds = number requested
+        levels.length,
         JSON.stringify({ messageId, levels }),
         now()
       );
@@ -434,46 +753,132 @@ class DB {
     return tx();
   }
 
-  getRequest({ guildId, seasonId, messageId }) {
-  return this.getRequestStmt.get(guildId, seasonId, messageId) || null;
+  cancelRequest({ guildId, seasonId, messageId, cancelledBy }) {
+    const meta = JSON.stringify({ cancelledBy });
+    const res = this.cancelRequestStmt.run(meta, now(), guildId, seasonId, messageId);
+    return res.changes === 1;
   }
 
-  getLeaderboard(guildId, seasonId, limit = 10) {
-    return this.leaderboardStmt.all(guildId, seasonId, limit);
+  // =========================================================
+  // LEADERBOARDS
+  // =========================================================
+  getHitLeaderboard(guildId, seasonId, limit = 10) {
+    return this.hitLeaderboardStmt.all(guildId, seasonId, limit);
   }
 
   getBuildLeaderboard(guildId, seasonId, limit = 10) {
-  return this.buildLeaderboardStmt.all(guildId, seasonId, limit);
+    return this.buildLeaderboardStmt.all(guildId, seasonId, limit);
   }
 
-  getHitLeaderboard(guildId, seasonId, limit = 10) {
-  return this.leaderboardStmt.all(guildId, seasonId, limit);
-  }
-
+  // =========================================================
+  // ACTIVITY / CHART QUERIES
+  // =========================================================
   getDailyBuilds(guildId, seasonId, days = 7) {
-  // days back including today
-  const since = `-${days} days`;
-  return this.dailyBuildsStmt.all(guildId, seasonId, since);
-}
+    const offsetExpr = this.getOffsetExpr(guildId);
+    const since = `-${days} days`;
+    return this.dailyBuildsStmt.all(offsetExpr, guildId, seasonId, offsetExpr, offsetExpr, since);
+  }
 
-getDailyHits(guildId, seasonId, days = 7) {
-  const since = `-${days} days`;
-  return this.dailyHitsStmt.all(guildId, seasonId, since);
-}
+  getDailyHits(guildId, seasonId, days = 7) {
+    const offsetExpr = this.getOffsetExpr(guildId);
+    const since = `-${days} days`;
+    return this.dailyHitsStmt.all(offsetExpr, guildId, seasonId, offsetExpr, offsetExpr, since);
+  }
 
-getDailyTotals(guildId, seasonId, days = 7) {
-  const since = `-${days} days`;
-  return this.dailyTotalsStmt.all(guildId, seasonId, since);
-}
+  getDailyTotals(guildId, seasonId, days = 7) {
+    const offsetExpr = this.getOffsetExpr(guildId);
+    const since = `-${days} days`;
+    return this.dailyTotalsStmt.all(offsetExpr, guildId, seasonId, offsetExpr, offsetExpr, since);
+  }
 
-getUserDailyTotals(guildId, seasonId, userId) {
-  return this.userDailyTotalsStmt.all(guildId, seasonId, userId);
-}
+  getUserDailyTotals(guildId, seasonId, userId) {
+    const offsetExpr = this.getOffsetExpr(guildId);
+    return this.userDailyTotalsStmt.all(offsetExpr, guildId, seasonId, userId, offsetExpr, offsetExpr);
+  }
 
-getActivityAll(guildId, seasonId) {
-  return this.activityAllStmt.all(guildId, seasonId);
-}
+  getActivityAll(guildId, seasonId) {
+    const offsetExpr = this.getOffsetExpr(guildId);
+    return this.activityAllStmt.all(
+      offsetExpr, // agg day bucketing
+      offsetExpr, // created_at compare (used in WHERE)
+      guildId,
+      seasonId,
+      offsetExpr, // now offset in compare
+      offsetExpr, // days.today
+      offsetExpr  // days.yesterday
+    );
+  }
 
+  getUserDailySeries(guildId, seasonId, userId, days = 14) {
+    const offsetExpr = this.getOffsetExpr(guildId);
+    const startDayOffset = `-${days - 1} days`; // include today
+    const since = `-${days} days`;
+    return this.userDailySeriesStmt.all(
+      offsetExpr,
+      startDayOffset,
+      offsetExpr,
+      offsetExpr,
+      guildId,
+      seasonId,
+      userId,
+      offsetExpr,
+      offsetExpr,
+      since
+    );
+  }
+
+  getServerDailySeries(guildId, seasonId, days = 14) {
+    const offsetExpr = this.getOffsetExpr(guildId);
+    const startDayOffset = `-${days - 1} days`;
+    const since = `-${days} days`;
+
+    return this.serverDailySeriesForChartStmt.all(
+      offsetExpr,
+      startDayOffset,
+      offsetExpr,
+      offsetExpr,
+      guildId,
+      seasonId,
+      offsetExpr,
+      offsetExpr,
+      since
+    );
+  }
+
+  getUserTotalsSeason(guildId, seasonId) {
+    return this.userTotalsSeasonStmt.all(guildId, seasonId);
+  }
+
+  getUserTotalsWindow(guildId, seasonId, days = 14) {
+    const offsetExpr = this.getOffsetExpr(guildId);
+    const since = `-${days} days`;
+    return this.userTotalsWindowStmt.all(guildId, seasonId, offsetExpr, offsetExpr, since);
+  }
+
+  // =========================================================
+  // EXPORTDAILY
+  // =========================================================
+  exportDailySeason(guildId, seasonId) {
+    const offsetExpr = this.getOffsetExpr(guildId);
+    return this.exportDailySeasonStmt.all(offsetExpr, guildId, seasonId);
+  }
+
+  exportDailyWindow(guildId, seasonId, days = 7) {
+    const offsetExpr = this.getOffsetExpr(guildId);
+    const since = `-${days} days`;
+    return this.exportDailyWindowStmt.all(
+      offsetExpr, // day bucketing
+      guildId,
+      seasonId,
+      offsetExpr, // created_at compare
+      offsetExpr, // now offset
+      since
+    );
+  }
+
+  // =========================================================
+  // Close
+  // =========================================================
   close() {
     this.db.close();
   }
