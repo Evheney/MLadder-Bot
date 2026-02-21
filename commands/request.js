@@ -5,11 +5,9 @@ const {
   ButtonBuilder,
   ButtonStyle,
   MessageFlags,
-  PermissionsBitField,
 } = require("discord.js");
 
-// Optional: ping a specific user if you really want.
-// Better: ping the Builder role from guild_settings.
+// Optional fallback ping if builder role not configured in guild_settings
 const PLO_KOON_ID = "426881818764115968"; // replace or leave as-is
 
 function parseLevels(input) {
@@ -31,21 +29,53 @@ function parseLevels(input) {
   return levels;
 }
 
-function buildRequestComponents(status = "open") {
+function buildRequestComponents(messageId, status = "open") {
+  const s = String(status || "").toLowerCase();
+
+  const claimEnabled = s === "open";
+  const completeEnabled = s === "claimed";
+  const cancelEnabled = s === "open" || s === "claimed";
+
+  // If messageId not known yet, disable everything (we will edit after send)
+  const hasId = !!messageId;
+
   return [
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId("request:claim")
+        .setCustomId(hasId ? `req:claim:${messageId}` : "req:claim:pending")
         .setLabel("Claim")
         .setStyle(ButtonStyle.Primary)
-        .setDisabled(status !== "open"),
+        .setDisabled(!hasId || !claimEnabled),
+
       new ButtonBuilder()
-        .setCustomId("request:complete")
+        .setCustomId(hasId ? `req:complete:${messageId}` : "req:complete:pending")
         .setLabel("Complete")
         .setStyle(ButtonStyle.Success)
-        .setDisabled(status !== "claimed")
+        .setDisabled(!hasId || !completeEnabled),
+
+      new ButtonBuilder()
+        .setCustomId(hasId ? `req:cancel:${messageId}` : "req:cancel:pending")
+        .setLabel("Cancel")
+        .setStyle(ButtonStyle.Danger)
+        .setDisabled(!hasId || !cancelEnabled)
     ),
   ];
+}
+
+async function cacheMemberFromInteraction({ interaction, client, guildId }) {
+  const user = interaction.user;
+
+  // Try to get nickname (guild-specific)
+  const member = interaction.member ?? (await interaction.guild?.members.fetch(user.id).catch(() => null));
+
+  client.db.upsertMember({
+    guildId,
+    userId: user.id,
+    botRole: null, // do NOT override role here
+    username: user.username ?? null,
+    globalName: user.globalName ?? null,
+    nickname: member?.nickname ?? null,
+  });
 }
 
 module.exports = {
@@ -59,7 +89,6 @@ module.exports = {
         .setRequired(true)
     ),
 
-  // NOTE: we need client here
   async execute(interaction, client) {
     const guildId = interaction.guildId;
     if (!guildId) {
@@ -69,7 +98,6 @@ module.exports = {
       });
     }
 
-    // Basic bot permission: must be able to send messages where command used
     const channel = interaction.channel;
     if (!channel) {
       return interaction.reply({
@@ -92,6 +120,8 @@ module.exports = {
     }
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    // ✅ keep members cache fresh for exports/charts
+    await cacheMemberFromInteraction({ interaction, client, guildId }).catch(() => {});
 
     // Ensure DB + active season
     client.db.ensureGuild(guildId);
@@ -114,19 +144,28 @@ module.exports = {
       .setDescription(
         `Player: <@${user.id}>\n` +
         `Requested: **${levels.join(", ")}**\n\n` +
-        `Status: **open**\n` +
-        `Claimed by: **—**`
+        `Status: **OPEN**\n` +
+        `Claimed by: **—**\n\n` +
+        `Buttons:\n` +
+        `• **Claim** = builder takes it\n` +
+        `• **Complete** = claimer finishes it\n` +
+        `• **Cancel** = requester (if OPEN) / claimer (if CLAIMED) / admin`
       );
 
-    // Post the request message (this gives us a real message id immediately)
+    // 1) Send message first (buttons disabled until we know msg.id)
     const msg = await channel.send({
       content: pingText,
       embeds: [embed],
-      components: buildRequestComponents("open"),
+      components: buildRequestComponents(null, "open"),
       allowedMentions,
     });
 
-    // Store request in SQLite
+    // 2) Edit message with proper customIds containing msg.id
+    await msg.edit({
+      components: buildRequestComponents(msg.id, "open"),
+    }).catch(() => {});
+
+    // Store in SQLite
     client.db.createRequest({
       guildId,
       seasonId,
@@ -138,4 +177,3 @@ module.exports = {
     return interaction.editReply(`✅ Request created: ${msg.url}`);
   },
 };
-

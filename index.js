@@ -60,8 +60,16 @@ client.on(Events.InteractionCreate, async interaction => {
     // Buttons (role picker + requests)
     if (interaction.isButton()) {
       // IMPORTANT: do NOT return after role picker.
-      await handleRolePickerButton(interaction, client);
-      await handleRequestButtons(interaction, client);
+      // Also: don't let one handler failure block the other.
+
+      await handleRolePickerButton(interaction, client).catch(err => {
+        console.error("RolePicker button error:", err);
+      });
+
+      await handleRequestButtons(interaction, client).catch(err => {
+        console.error("RequestButtons error:", err);
+      });
+
       return;
     }
   } catch (error) {
