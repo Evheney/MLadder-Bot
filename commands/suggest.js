@@ -49,7 +49,7 @@ module.exports = {
     if (!guildId) {
       return interaction.reply({
         content: "❌ Use this command inside a server.",
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
     }
 
@@ -64,7 +64,7 @@ module.exports = {
     if (recent.length === 0) {
       return interaction.reply({
         content: "❌ No hits recorded yet. Use `/request` and have builder react ✅, then try again.",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
 
@@ -72,7 +72,7 @@ module.exports = {
     if (!target) {
       return interaction.reply({
         content: "❌ Could not determine target level from your hits.",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
 
@@ -96,7 +96,7 @@ module.exports = {
 
     await interaction.reply({
       embeds: [embed],
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   },
 };

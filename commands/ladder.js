@@ -44,7 +44,7 @@ module.exports = {
     if (!guildId) {
       return interaction.reply({
         content: "❌ Use this command inside a server, not in DMs.",
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
     }
 
@@ -56,7 +56,7 @@ module.exports = {
     if (!me || !me.valor) {
       return interaction.reply({
         content: "❌ You don't have valor saved. Use `/valor 5G` first.",
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
     }
 
@@ -64,7 +64,7 @@ module.exports = {
     if (!topBuilder) {
       return interaction.reply({
         content: "❌ No builder valor set yet. A builder must use `/buildervalor` first.",
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
     }
 
@@ -116,6 +116,6 @@ module.exports = {
       embed.addFields({ name: "Weaker than you (closest)", value: "None found." });
     }
 
-    return interaction.reply({ embeds: [embed], ephemeral: true });
+    return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
   }
 };

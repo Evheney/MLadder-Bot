@@ -17,7 +17,7 @@ module.exports = {
     if (!guildId) {
       return interaction.reply({
         content: "❌ Use this command inside a server, not in DMs.",
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
     }
 
@@ -29,12 +29,12 @@ module.exports = {
       if (!rec) {
         return interaction.reply({
           content: "No valor saved yet on this server. Use `/valor 5G`.",
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
       }
       return interaction.reply({
         content: `Your saved valor: **${formatValue(rec.valor)}** (type: ${rec.type})`,
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
     }
 
@@ -43,14 +43,14 @@ module.exports = {
     try {
       v = parseValue(raw);
     } catch (e) {
-      return interaction.reply({ content: `❌ ${e.message}`, ephemeral: true });
+      return interaction.reply({ content: `❌ ${e.message}`, flags: MessageFlags.Ephemeral });
     }
 
     await valorStore.upsert(guildId, interaction.user.id, v, "player");
 
     return interaction.reply({
       content: `Saved your valor as **${formatValue(v)}** (player) for this server.`,
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
   }
 };

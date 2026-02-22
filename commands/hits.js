@@ -11,7 +11,7 @@ module.exports = {
     if (!guildId) {
       return interaction.reply({
         content: "❌ Use this command inside a server, not in DMs.",
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
     }
 
@@ -36,7 +36,7 @@ module.exports = {
 
     await interaction.reply({
       embeds: [embed],
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
   }
 };

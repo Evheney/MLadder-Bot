@@ -3,7 +3,6 @@ const { parseValue, formatValue } = require("../utils/number");
 const cityTable = require("../tables/cityTable.json");
 
 function getBestCityByWall(powerWall) {
-  // cityTable keys are strings "1".."200"
   const levels = Object.keys(cityTable)
     .map(Number)
     .filter(n => Number.isFinite(n))
@@ -18,11 +17,10 @@ function getBestCityByWall(powerWall) {
     if (wall <= powerWall) {
       best = { level: lvl, wall };
     } else {
-      break; // since levels sorted ascending, we can stop early
+      break;
     }
   }
 
-  // find next level after best (for "next target")
   let next = null;
   if (best) {
     const idx = levels.indexOf(best.level);
@@ -34,7 +32,6 @@ function getBestCityByWall(powerWall) {
       };
     }
   } else {
-    // no city fits; show the smallest one
     const firstLvl = levels[0];
     if (firstLvl !== undefined) {
       next = {
@@ -50,11 +47,11 @@ function getBestCityByWall(powerWall) {
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("power")
-    .setDescription("Find the highest city level whose wall is <= your power.")
+    .setDescription("Attack Power (Advisor) → find max city.")
     .addStringOption(opt =>
       opt
         .setName("wall")
-        .setDescription("Your wall power, e.g. 5G, 120M, 700K")
+        .setDescription("Your Attack Power (ex: 15G, 700K)")
         .setRequired(true)
     ),
 
@@ -65,26 +62,25 @@ module.exports = {
     try {
       powerWall = parseValue(raw);
     } catch (e) {
-      return interaction.reply({ content: `❌ ${e.message}`, ephemeral: true });
+      return interaction.reply({ content: `❌ ${e.message}`, flags: MessageFlags.Ephemeral });
     }
 
     const { best, next } = getBestCityByWall(powerWall);
 
     if (!best) {
-      // user too weak for even the smallest city (or table missing)
       if (!next) {
-        return interaction.reply({ content: "❌ City table is empty or not loaded.", ephemeral: true });
+        return interaction.reply({ content: "❌ City table missing.", flags: MessageFlags.Ephemeral });
       }
 
       const embed = new EmbedBuilder()
         .setTitle("City lookup by power")
         .setDescription(`Your power: **${formatValue(powerWall)}**`)
         .addFields(
-          { name: "Result", value: "You are below the minimum city wall in the table." },
+          { name: "Result", value: "Below minimum city wall." },
           { name: "Minimum city", value: `Level **${next.level}** (Wall **${formatValue(next.wall)}**)` }
         );
 
-      return interaction.reply({ embeds: [embed], ephemeral: true });
+      return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
     }
 
     const embed = new EmbedBuilder()
@@ -102,6 +98,6 @@ module.exports = {
       });
     }
 
-    return interaction.reply({ embeds: [embed], ephemeral: true });
+    return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
   },
 };

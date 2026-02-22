@@ -66,7 +66,7 @@ module.exports = {
       base = parseValue(rawPower);
       bonusPct = parsePercent(rawPercent);
     } catch (e) {
-      return interaction.reply({ content: `❌ ${e.message}`, ephemeral: true });
+      return interaction.reply({ content: `❌ ${e.message}`, flags: MessageFlags.Ephemeral });
     }
 
     // Total percent = 100% + bonus
@@ -106,6 +106,6 @@ module.exports = {
       }
     }
 
-    return interaction.reply({ embeds: [embed], ephemeral: true });
+    return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
   }
 };
