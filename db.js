@@ -119,6 +119,11 @@ class DB {
     }
 
     this._prepare();
+    
+    // -----------------
+    // Action batching (write-behind)
+    // -----------------
+    this.initActionBuffer({ flushIntervalMs: 60_000, maxQueue: 400 });
   }
 
   // -----------------
@@ -260,6 +265,12 @@ class DB {
       UPDATE requests
       SET status='claimed', claimed_by=?, updated_at=?
       WHERE guild_id=? AND season_id=? AND message_id=? AND status='open'
+    `);
+
+    this.stmtSetRequestMeta = this.db.prepare(`
+      UPDATE requests
+      SET meta_json = ?, updated_at = ?
+      WHERE guild_id = ? AND season_id = ? AND message_id = ?
     `);
 
     // requires same builder to complete
@@ -710,48 +721,65 @@ class DB {
     );
     return result.changes === 1;
   }
+  setRequestMeta({ guildId, seasonId, messageId, metaJson }) {
+    const ts = now();
+    const res = this.stmtSetRequestMeta.run(metaJson, ts, guildId, seasonId, messageId);
+    return res.changes > 0;
+  }
 
   completeRequest({ guildId, seasonId, messageId, builderId, levels }) {
-    const tx = this.db.transaction(() => {
-      const res = this.completeRequestStmt.run(
-        now(),
-        guildId,
-        seasonId,
-        messageId,
-        builderId
-      );
+  const t = now();
 
-      if (res.changes !== 1) return false;
+  // Do the request status transition atomically (MUST be immediate)
+  const tx = this.db.transaction(() => {
+    const res = this.completeRequestStmt.run(
+      t,
+      guildId,
+      seasonId,
+      messageId,
+      builderId
+    );
 
-      // hits: 1 per level
-      for (const lvl of levels) {
-        this.insertActionStmt.run(
-          guildId,
-          seasonId,
-          builderId,
-          "hit",
-          1,
-          JSON.stringify({ level: lvl, messageId }),
-          now()
-        );
-      }
+    if (res.changes !== 1) return null;
 
-      // builds: value = number requested (levels.length)
-      this.insertActionStmt.run(
-        guildId,
-        seasonId,
-        builderId,
-        "build",
-        levels.length,
-        JSON.stringify({ messageId, levels }),
-        now()
-      );
+    // Build action rows to enqueue (NOT written to DB here)
+    const actionsToQueue = [];
 
-      return true;
+    // hits: 1 per level (keeps your max-hit logic intact)
+    for (const lvl of levels) {
+      actionsToQueue.push({
+        guild_id: guildId,
+        season_id: seasonId,
+        user_id: builderId,
+        type: "hit",
+        value: 1,
+        meta_json: JSON.stringify({ level: lvl, messageId }),
+        created_at: t,
+      });
+    }
+
+    // builds: value = number requested (levels.length)
+    actionsToQueue.push({
+      guild_id: guildId,
+      season_id: seasonId,
+      user_id: builderId,
+      type: "build",
+      value: levels.length,
+      meta_json: JSON.stringify({ messageId, levels }),
+      created_at: t,
     });
 
-    return tx();
-  }
+    return actionsToQueue;
+  });
+
+  const actions = tx();
+  if (!actions) return false;
+
+  // Enqueue outside the transaction to avoid nested transactions / delays
+  for (const a of actions) this.enqueueAction(a);
+
+  return true;
+}
 
   cancelRequest({ guildId, seasonId, messageId, cancelledBy }) {
     const meta = JSON.stringify({ cancelledBy });
@@ -876,10 +904,73 @@ class DB {
     );
   }
 
+    // =========================================================
+  // Action batching (write-behind buffer)
+  // - Buffers INSERTs into actions table
+  // - Flushes every N ms or when queue hits maxQueue
+  // =========================================================
+  initActionBuffer({ flushIntervalMs = 60_000, maxQueue = 400 } = {}) {
+    this._actionQueue = [];
+    this._actionFlushIntervalMs = flushIntervalMs;
+    this._actionMaxQueue = maxQueue;
+
+    if (this._actionFlushTimer) clearInterval(this._actionFlushTimer);
+
+    this._actionFlushTimer = setInterval(() => {
+      try {
+        this.flushActionQueue();
+      } catch (e) {
+        console.error("flushActionQueue error:", e);
+      }
+    }, this._actionFlushIntervalMs);
+
+    // Don't keep the process alive because of this interval
+    if (typeof this._actionFlushTimer.unref === "function") {
+      this._actionFlushTimer.unref();
+    }
+  }
+
+  enqueueAction(actionRow) {
+    // actionRow shape:
+    // { guild_id, season_id, user_id, type, value, meta_json, created_at }
+    if (!this._actionQueue) this._actionQueue = [];
+    this._actionQueue.push(actionRow);
+
+    if (this._actionQueue.length >= (this._actionMaxQueue || 400)) {
+      this.flushActionQueue();
+    }
+  }
+
+  flushActionQueue() {
+    if (!this._actionQueue || this._actionQueue.length === 0) return 0;
+
+    const batch = this._actionQueue;
+    this._actionQueue = [];
+
+    const tx = this.db.transaction(() => {
+      for (const a of batch) {
+        this.insertActionStmt.run(
+          a.guild_id,
+          a.season_id,
+          a.user_id,
+          a.type,
+          a.value,
+          a.meta_json ?? null,
+          a.created_at
+        );
+      }
+    });
+
+    tx();
+    return batch.length;
+  }
+
   // =========================================================
   // Close
   // =========================================================
-  close() {
+    close() {
+    try { this.flushActionQueue(); } catch (_) {}
+    try { if (this._actionFlushTimer) clearInterval(this._actionFlushTimer); } catch (_) {}
     this.db.close();
   }
 }

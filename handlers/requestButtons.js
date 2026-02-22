@@ -136,6 +136,92 @@ async function cacheMember({ guild, client, guildId, userId, botRole = null }) {
 }
 
 // =========================================================
+// NEW: Notify requester (replace previous notify for THIS request)
+// - deletes old notify message stored in meta_json.notifyMessageId
+// - sends new notify reply in same channel
+// - stores new notify message id back to meta_json
+// ========================================================
+async function notifyRequesterReplaceForThisRequest({
+  interaction,
+  client,
+  guildId,
+  seasonId,
+  messageId,
+  req,
+  levels,
+}) {
+  const requesterId = req.requester_id;
+  const builderId = req.claimed_by;
+
+  // Parse meta_json
+  let meta = {};
+  try {
+    meta = req.meta_json ? JSON.parse(req.meta_json) : {};
+  } catch {
+    meta = {};
+  }
+
+  // Delete old notify if exists
+  const oldNotifyId = meta?.notifyMessageId || null;
+  if (oldNotifyId) {
+    try {
+      const ch = interaction.channel;
+      if (ch) {
+        const oldMsg = await ch.messages.fetch(oldNotifyId);
+        await oldMsg.delete();
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // Build clean mention list (no duplicates)
+const mentionUsers = [...new Set([requesterId, builderId].filter(Boolean))];
+
+// Clean text if same person completed their own request
+const who =
+  requesterId === builderId
+    ? `<@${requesterId}> completed their request`
+    : `<@${requesterId}> completed by <@${builderId}>`;
+
+const content =
+  `✅ ${who}` +
+  (Array.isArray(levels) && levels.length ? ` | **${levels.join(", ")}**` : "");
+
+let newMsg;
+try {
+  const ch = interaction.channel;
+  if (!ch) throw new Error("No channel context.");
+  newMsg = await ch.send({
+    content,
+    allowedMentions: { users: mentionUsers, roles: [], parse: [] },
+  });
+  } catch (e) {
+    // show the builder/admin WHY it failed (only they see this)
+    await interaction.followUp({
+      content: `❌ Notify failed: ${e?.message || e}`,
+      flags: MessageFlags.Ephemeral,
+    }).catch(() => {});
+    return;
+  }
+
+  // Save new notify id into meta_json
+  meta.notifyMessageId = newMsg.id;
+
+  // Persist (so we can delete/replace next time)
+  try {
+    client.db.setRequestMeta({
+      guildId,
+      seasonId,
+      messageId,
+      metaJson: JSON.stringify(meta),
+    });
+  } catch {
+    // ignore (notify still worked)
+  }
+}
+
+// =========================================================
 // Main handler
 // =========================================================
 async function handleRequestButtons(interaction, client) {
@@ -232,6 +318,18 @@ async function handleRequestButtons(interaction, client) {
 
     req = client.db.getRequest({ guildId, seasonId, messageId });
     await updateRequestMessage(interaction, req, messageId);
+
+    // ✅ notify requester in same channel (replace previous notify for THIS request)
+    await notifyRequesterReplaceForThisRequest({
+      interaction,
+      client,
+      guildId,
+      seasonId,
+      messageId,
+      req,
+      levels,
+    }).catch(() => {});
+
     return;
   }
 
