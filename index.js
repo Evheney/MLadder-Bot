@@ -90,6 +90,16 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 });
 
+function shutdown(signal) {
+  console.log(`Received ${signal}, flushing queued actions...`);
+  try { client.db.flushActionQueue(); } catch (e) { console.error(e); }
+  try { client.db.close(); } catch (e) { console.error(e); }
+  process.exit(0);
+}
+
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+
 // ✅ TEMPORARY: disable old reaction handler while migrating to buttons
 // If you still need reactions for something else, keep it, but your old requests.json system must be OFF.
 //// const registerReactionAddHandler = require("./handlers/reactionAdd");

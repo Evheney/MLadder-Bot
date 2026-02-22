@@ -34,6 +34,7 @@ module.exports = {
     }
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    client.db.flushActionQueue();
 
     const guild = interaction.guild;
     const guildId = guild.id;

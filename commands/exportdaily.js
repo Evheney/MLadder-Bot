@@ -135,6 +135,7 @@ module.exports = {
     const scope = interaction.options.getString("scope", true);
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    client.db.flushActionQueue();
 
     // Active season (your DB method returns active or creates season 1 if missing)
     // If you later want "season number" explicitly, you can query seasons table.
