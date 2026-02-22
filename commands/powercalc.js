@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
+const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require("discord.js");
 const { parseValue, formatValue } = require("../utils/number");
 const cityTable = require("../tables/cityTable.json");
 

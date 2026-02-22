@@ -1,4 +1,4 @@
-const { SlashCommandBuilder } = require("discord.js");
+const { SlashCommandBuilder, MessageFlags } = require("discord.js");
 const { parseValue, formatValue } = require("../utils/number");
 const valorStore = require("../utils/valorStore");
 
