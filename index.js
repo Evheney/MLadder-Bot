@@ -19,8 +19,6 @@ const {
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    // Reactions not needed once we move requests to buttons,
-    // but can stay for now if your old reaction handler is still enabled.
     GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
@@ -31,9 +29,12 @@ const client = new Client({
 client.db = new DB();
 client.commands = new Collection();
 
-// Load commands
+// ----------------------------
+// Load Commands
+// ----------------------------
 const commandsPath = path.join(__dirname, "commands");
 const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith(".js"));
+
 for (const file of commandFiles) {
   const command = require(path.join(commandsPath, file));
   client.commands.set(command.data.name, command);
@@ -43,53 +44,86 @@ client.once(Events.ClientReady, () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
-// Interactions (slash + buttons)
+// ----------------------------
+// Interaction Handler
+// ----------------------------
 client.on(Events.InteractionCreate, async interaction => {
   try {
-    // Slash commands
+    // ==========================
+    // SLASH COMMANDS
+    // ==========================
     if (interaction.isChatInputCommand()) {
       const command = client.commands.get(interaction.commandName);
+
       if (!command) {
         console.error(`No command found: ${interaction.commandName}`);
         return;
       }
+
       await command.execute(interaction, client);
       return;
     }
 
-    // Buttons (role picker + requests)
+    // ==========================
+    // BUTTONS
+    // ==========================
     if (interaction.isButton()) {
-      // IMPORTANT: do NOT return after role picker.
-      // Also: don't let one handler failure block the other.
+      let handled = false;
 
-      await handleRolePickerButton(interaction, client).catch(err => {
+      // 1️⃣ Role Picker Handler
+      try {
+        handled = await handleRolePickerButton(interaction, client);
+      } catch (err) {
         console.error("RolePicker button error:", err);
-      });
 
-      await handleRequestButtons(interaction, client).catch(err => {
+        // If it was a rolepick button, don't allow other handlers to reply
+        if (
+          interaction.customId &&
+          String(interaction.customId).startsWith("rolepick:")
+        ) {
+          handled = true;
+        }
+      }
+
+      if (handled) return;
+
+      // 2️⃣ Request Buttons Handler
+      try {
+        const requestHandled = await handleRequestButtons(interaction, client);
+        if (requestHandled) return;
+      } catch (err) {
         console.error("RequestButtons error:", err);
-      });
+      }
 
       return;
     }
+
   } catch (error) {
-    console.error(error);
+    console.error("Interaction handler error:", error);
 
     const msg = "Error handling interaction.";
+
     if (interaction.isRepliable()) {
-      if (interaction.replied || interaction.deferred) {
-        await interaction
-          .followUp({ content: msg, flags: MessageFlags.Ephemeral })
-          .catch(() => {});
-      } else {
-        await interaction
-          .reply({ content: msg, flags: MessageFlags.Ephemeral })
-          .catch(() => {});
-      }
+      try {
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp({
+            content: msg,
+            flags: MessageFlags.Ephemeral,
+          });
+        } else {
+          await interaction.reply({
+            content: msg,
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+      } catch (_) {}
     }
   }
 });
 
+// ----------------------------
+// Graceful Shutdown
+// ----------------------------
 function shutdown(signal) {
   console.log(`Received ${signal}, flushing queued actions...`);
   try { client.db.flushActionQueue(); } catch (e) { console.error(e); }
@@ -100,9 +134,18 @@ function shutdown(signal) {
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-// ✅ TEMPORARY: disable old reaction handler while migrating to buttons
-// If you still need reactions for something else, keep it, but your old requests.json system must be OFF.
-//// const registerReactionAddHandler = require("./handlers/reactionAdd");
-//// registerReactionAddHandler(client);
+// ----------------------------
+// Global Error Logging
+// ----------------------------
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled Rejection:", err);
+});
 
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err);
+});
+
+// ----------------------------
+// Login
+// ----------------------------
 client.login(process.env.DISCORD_TOKEN);

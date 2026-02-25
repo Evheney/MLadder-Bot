@@ -19,7 +19,7 @@ function toOffsetExprMinutes(mins) {
 
 class DB {
   constructor() {
-    const dbPath = path.join(__dirname, "bot.db");
+    const dbPath = path.join(process.cwd(), "bot.db");
     this.db = new Database(dbPath);
 
     // -----------------
