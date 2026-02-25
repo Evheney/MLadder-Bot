@@ -1,15 +1,19 @@
 {
-  "name": "ladder-bot",
+  "name": "mladder-bot",
   "version": "1.0.0",
-  "description": "",
+  "description": "Guild-scoped Discord bot for tracking builds, hits, valor and seasonal ladder statistics.",
   "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "author": "Eugene Mar (martyyev@gmail.com)",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
     "better-sqlite3": "^12.6.2",
     "chart.js": "^4.5.1",
