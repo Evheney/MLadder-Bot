@@ -91,8 +91,8 @@ function padRight(value, width) {
 }
 
 function buildResponse(data) {
-  const leftWidth = 26;
-  const rightWidth = 26;
+  const leftWidth = 16;
+  const rightWidth = 16;
 
   const lines = [];
 
@@ -107,6 +107,7 @@ function buildResponse(data) {
   lines.push(
     `Total defense: **1 + ${(data.defensePct / 100).toFixed(3)} + ${(data.cityDefensePct / 100).toFixed(3)} = ${data.totalMultiplier.toFixed(3)}x**`
   );
+  lines.push(`Best striker retention: **${data.bestStrikerRetention}%**`);
   lines.push(`Defender troops: **${formatValue(Math.floor(data.defenderTroops))}**`);
   lines.push(`Attacker losses: **${formatValue(Math.round(data.attackerLosses))}**`);
   lines.push("");
@@ -116,13 +117,13 @@ function buildResponse(data) {
     `${padRight("ATTACKER GAINS", leftWidth)} | ${padRight("DEFENDER GAINS", rightWidth)}`
   );
   lines.push(
-    `${padRight("--------------------------", leftWidth)}-|-${padRight("--------------------------", rightWidth)}`
+    `${padRight("----------------", leftWidth)}-|-${padRight("----------------", rightWidth)}`
   );
   lines.push(
     `${padRight("Gold: " + formatValue(Math.round(data.attackerGold)), leftWidth)} | ${padRight("City Gold: " + formatValue(Math.round(data.defenderCityGold)), rightWidth)}`
   );
   lines.push(
-    `${padRight("EXP: " + formatValue(Math.round(data.attackerExp)), leftWidth)} | ${padRight("Salvage Gold: " + formatValue(Math.round(data.defenderSalvageGold)), rightWidth)}`
+    `${padRight("EXP: " + formatValue(Math.round(data.attackerExp)), leftWidth)} | ${padRight("Salvage: " + formatValue(Math.round(data.defenderSalvageGold)), rightWidth)}`
   );
   lines.push(
     `${padRight("", leftWidth)} | ${padRight("Total Gold: " + formatValue(Math.round(data.defenderTotalGold)), rightWidth)}`
@@ -131,11 +132,60 @@ function buildResponse(data) {
     `${padRight("", leftWidth)} | ${padRight("EXP: " + formatValue(Math.round(data.defenderExp)), rightWidth)}`
   );
   lines.push(
-  `${padRight("Permanent loss (10%): " + formatValue(Math.round(data.attackerPermanentLoss)), leftWidth)} | ${padRight("Permanent loss (10%): " + formatValue(Math.round(data.defenderPermanentLoss)), rightWidth)}`
+  `${padRight("Perma loss: " + formatValue(Math.round(data.attackerPermanentLoss)), leftWidth)} | ${padRight("Perma loss: " + formatValue(Math.round(data.defenderPermanentLoss)), rightWidth)}`
 );
   lines.push("```");
 
   return lines.join("\n");
+}
+
+//helper to calculate the best outcome
+function findBestStrikerRetention({
+  attackPower,
+  targetWall,
+  strikerPct,
+  salvagePct,
+  defenderCityGold,
+}) {
+  let bestValid = null;
+  let bestFallback = null;
+
+  for (let pct = 100; pct >= 5; pct -= 1) {
+    const retention = pct / 100;
+
+    // Keep base 1x, reduce only the striker bonus part
+    const retainedAttackMultiplier = 1 + (strikerPct / 100) * retention;
+
+    // Convert remaining effective attack back into troop-equivalent base
+    const salvageBase =
+      retainedAttackMultiplier > 0
+        ? Math.max(0, (attackPower - targetWall) / retainedAttackMultiplier)
+        : 0;
+
+    const defenderSalvageGold = salvageBase * (salvagePct / 100);
+    const defenderTotalGold = defenderCityGold + defenderSalvageGold;
+
+    const candidate = {
+      retentionPct: pct,
+      retainedAttackMultiplier,
+      salvageBase,
+      defenderSalvageGold,
+      defenderTotalGold,
+      valid: defenderSalvageGold > defenderCityGold,
+    };
+
+    if (!bestFallback || candidate.defenderTotalGold > bestFallback.defenderTotalGold) {
+      bestFallback = candidate;
+    }
+
+    if (candidate.valid) {
+      if (!bestValid || candidate.defenderTotalGold > bestValid.defenderTotalGold) {
+        bestValid = candidate;
+      }
+    }
+  }
+
+  return bestValid || bestFallback;
 }
 
 module.exports = {
@@ -258,21 +308,38 @@ module.exports = {
 
       // 6) Defender troops attacker can still beat
       const rawDefenderTroops = (attackPower - targetCity.wall) / totalMultiplier;
-      const defenderTroops = Math.max(0, rawDefenderTroops);
+      const defenderTroops = Math.max(0, rawDefenderTroops - 1);
 
       // 7) Attacker troop losses
-      const attackerLosses = defenderTroops * (lossFactorPct / 100);
+      const attackerLosses =attackTroops;
 
       // 8) Gold results
+      
+      // attacker gold stays same
       const attackerGold = defenderTroops * (scavengerPct / 100);
-      const defenderSalvageGold = attackerLosses * (salvagePct / 100);
+
+      // new salvage formula
+      const salvageBase = (attackPower - targetCity.wall ) / attackMultiplier;
+
+      // prevent negative salvage (important)
       const defenderCityGold = cityProgressGold * (DEFENDER_CITY_RETURN_PCT / 100);
-      const defenderTotalGold = defenderCityGold + defenderSalvageGold;
+
+      // Search best striker retention from 100% down to 75%
+      const bestRetention = findBestStrikerRetention({
+        attackPower,
+        targetWall: targetCity.wall,
+        strikerPct,
+        salvagePct,
+        defenderCityGold,
+      });
+
+      const defenderSalvageGold = bestRetention.defenderSalvageGold;
+      const defenderTotalGold = bestRetention.defenderTotalGold;    
 
       const attackerExp =(3 * defenderTroops) + attackerLosses + targetCity.wall;
 
       // TEMP formula - change if needed
-      const defenderExp = attackerLosses;
+      const defenderExp = attackerLosses * 3 + defenderTroops;
 
       const attackerPermanentLoss = attackerLosses * 0.10;
       const defenderPermanentLoss = defenderTroops * 0.10;
@@ -288,6 +355,7 @@ module.exports = {
         defensePct,
         cityDefensePct,
         totalMultiplier,
+        bestStrikerRetention: bestRetention.retentionPct,
         defenderTroops,
         attackerLosses,
         attackerGold,
